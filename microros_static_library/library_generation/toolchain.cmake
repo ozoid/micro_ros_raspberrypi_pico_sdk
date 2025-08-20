@@ -1,4 +1,4 @@
-include($ENV{PICO_SDK_PATH}/cmake/preload/toolchains/find_compiler.cmake)
+include($ENV{PICO_SDK_PATH}/cmake/preload/toolchains/pico_arm_cortex_m0plus_gcc.cmake)
 
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_CROSSCOMPILING 1)
