@@ -1,5 +1,12 @@
 {
     "files.associations": {
-        "stdint.h": "c"
+        "stdint.h": "c",
+        "custom_transport.h": "c",
+        "communication.h": "c",
+        "config.h": "c",
+        "stream_framing_protocol.h": "c",
+        "xmemory": "cpp",
+        "cmath": "cpp",
+        "valarray": "cpp"
     }
 }
