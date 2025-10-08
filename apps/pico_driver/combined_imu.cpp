@@ -26,6 +26,7 @@
 
 #include "pico_uart_transports.h"
 
+//#define USE_ODOM
 
 #define I2C_PORT i2c1
 #define SDA_PIN  14
@@ -58,7 +59,11 @@ volatile int32_t left_encoder_count = 0;
 volatile int32_t right_encoder_count = 0;
 
 // ROS interfaces
-rcl_publisher_t odom_pub;
+#ifdef USE_ODOM
+    rcl_publisher_t odom_pub;
+    nav_msgs__msg__Odometry odom_msg;
+#endif
+rcl_publisher_t left_pub, right_pub;
 rcl_publisher_t imu_pub;
 rclc_executor_t executor;
 rcl_subscription_t cmd_vel_sub;
@@ -68,7 +73,7 @@ rcl_node_t node;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 sensor_msgs__msg__Imu imu_msg;
-nav_msgs__msg__Odometry odom_msg;
+std_msgs__msg__Int32 left_msg, right_msg;
 
 float linear_vel = 0.0, angular_vel = 0.0;
 // Last commanded speeds
@@ -84,12 +89,13 @@ void emergency_blink(int code, bool ret = false){
     while (1) {
         for (volatile uint32_t t = 0; t < code; t++){
             gpio_put(PICO_DEFAULT_LED_PIN, 1);
-            for (volatile uint32_t i = 0; i < 5500000; ++i) { __asm volatile("nop"); }
+            for (volatile uint32_t i = 0; i < 1500000; ++i) { __asm volatile("nop"); }
             gpio_put(PICO_DEFAULT_LED_PIN, 0);
-            for (volatile uint32_t i = 0; i < 5500000; ++i) { __asm volatile("nop"); }
+            for (volatile uint32_t i = 0; i < 1500000; ++i) { __asm volatile("nop"); }
         }
-        for (volatile uint32_t i = 0; i < 10500000; ++i) { __asm volatile("nop"); }
+        for (volatile uint32_t i = 0; i < 5500000; ++i) { __asm volatile("nop"); }
         if(ret){
+            rcl_reset_error();  
             return;
         }
     }
@@ -274,15 +280,32 @@ void imu_task(void *arg) {
             emergency_blink(7);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
     vTaskDelete(NULL);
 }
 //-----------------------------------------------------------------------------
+void encoder_task(void*) {
+    int32_t last_l = 0, last_r = 0;
+    while (true) {
+        int32_t l = left_encoder_count;
+        int32_t r = right_encoder_count;
+
+        left_msg.data  = l;   // or (l - last_l) for deltas
+        right_msg.data = r;   // or (r - last_r)
+
+        rcl_publish(&left_pub,  &left_msg,  NULL);
+        rcl_publish(&right_pub, &right_msg, NULL);
+
+        last_l = l; last_r = r;
+        vTaskDelay(pdMS_TO_TICKS(50));  // 20 Hz
+    }
+}
+#ifdef USE_ODOM
 // ===== Odometry Task =====
 void odom_task(void *arg) {
     static int32_t last_left = 0, last_right = 0;
-    float x = 0, y = 0, theta = 0;
+    double x = 0, y = 0, theta = 0;
     //absolute_time_t last = get_absolute_time();
 
     while (true) {
@@ -294,10 +317,10 @@ void odom_task(void *arg) {
         last_left = l;
         last_right = r;
 
-        float dist_l = (dl / (float)TICKS_PER_REV) * 2 * 3.14159f * WHEEL_RADIUS;
-        float dist_r = (dr / (float)TICKS_PER_REV) * 2 * 3.14159f * WHEEL_RADIUS;
-        float dist = (dist_l + dist_r) / 2.0f;
-        float dtheta = (dist_r - dist_l) / WHEEL_BASE;
+        double dist_l = (dl / (double)TICKS_PER_REV) * 2 * 3.14159f * WHEEL_RADIUS;
+        double dist_r = (dr / (double)TICKS_PER_REV) * 2 * 3.14159f * WHEEL_RADIUS;
+        double dist = (dist_l + dist_r) / 2.0f;
+        double dtheta = (dist_r - dist_l) / WHEEL_BASE;
 
         x += dist * cosf(theta + dtheta / 2);
         y += dist * sinf(theta + dtheta / 2);
@@ -318,12 +341,13 @@ void odom_task(void *arg) {
         odom_msg.pose.pose.orientation.w = qw;
         rcl_ret_t rc = rcl_publish(&odom_pub, &odom_msg, NULL);
         if (rc != RCL_RET_OK) {
-            emergency_blink(6);
+            emergency_blink(6,true);
         }
-        vTaskDelay(pdMS_TO_TICKS(50)); // 20 Hz
+        vTaskDelay(pdMS_TO_TICKS(100)); // 20 Hz
     }
     vTaskDelete(NULL);
 }
+#endif
 //-----------------------------------------------------------------------------
 void init_i2c(){
     // Init I2C for IMU
@@ -346,53 +370,18 @@ void init_motors(){
 void init_encoders(){
     // Init encoders
     gpio_init(LEFT_ENC_A); 
+    gpio_init(LEFT_ENC_B); 
     gpio_init(RIGHT_ENC_A); 
+    gpio_init(RIGHT_ENC_B);
     gpio_set_dir(LEFT_ENC_A, false);   
+    gpio_set_dir(LEFT_ENC_B, false);   
     gpio_set_dir(RIGHT_ENC_A, false);  
+    gpio_set_dir(RIGHT_ENC_B, false);  
     gpio_set_irq_enabled_with_callback(LEFT_ENC_A, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
     gpio_set_irq_enabled(RIGHT_ENC_A, GPIO_IRQ_EDGE_RISE, true);
 }
 //-----------------------------------------------------------------------------
 // ===== App Main =====
-
-void test_task(void *arg) {
-    while (true) {
-        gpio_put(PICO_DEFAULT_LED_PIN, 1);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        gpio_put(PICO_DEFAULT_LED_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-int _main(void) {
-    #ifndef MY_CONFIG_MARKER
-    #error "Wrong FreeRTOSConfig.h being used!"
-    #endif
-    stdio_init_all();
-
-    gpio_init(PICO_DEFAULT_LED_PIN);
-    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
-    
-    // Blink before FreeRTOS to verify hardware works
-    for(int i = 0; i < 5; i++) {
-        gpio_put(PICO_DEFAULT_LED_PIN, 1);
-        sleep_ms(500);
-        gpio_put(PICO_DEFAULT_LED_PIN, 0);
-        sleep_ms(500);
-    }
-
-    xTaskCreate(test_task, "test", 512, NULL, 1, NULL);
-    vTaskStartScheduler();
-    
-    // Should never reach here
-    while(1) {
-        gpio_put(PICO_DEFAULT_LED_PIN, 1);
-        sleep_ms(100);
-        gpio_put(PICO_DEFAULT_LED_PIN, 0);
-        sleep_ms(100);
-    }
-}
-
 int main(void) {
     rmw_uros_set_custom_transport(
         true, NULL,
@@ -401,36 +390,32 @@ int main(void) {
         pico_serial_transport_write,
         pico_serial_transport_read);
 
-    //sleep_ms(100);
     busy_wait_ms(1000);
-
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
-    
-    //init_i2c();
+    init_i2c();
     init_motors();
     init_encoders();
-
- 
     gpio_put(PICO_DEFAULT_LED_PIN, 0);
-    // Make sure the agent is up before proceeding
+
     const int timeout_ms = 1000;
     const uint8_t attempts = 120;
     if (rmw_uros_ping_agent(timeout_ms, attempts) != RCL_RET_OK) {
         emergency_blink(1);
     }
-
     sensor_msgs__msg__Imu__init(&imu_msg);
-    nav_msgs__msg__Odometry__init(&odom_msg);
-
+    std_msgs__msg__Int32__init(&left_msg);
+    std_msgs__msg__Int32__init(&right_msg);
     rosidl_runtime_c__String__assign(&imu_msg.header.frame_id,  "base_link");
-    rosidl_runtime_c__String__assign(&odom_msg.header.frame_id, "odom");
-    // Odometry also commonly sets child_frame_id
-    rosidl_runtime_c__String__assign(&odom_msg.child_frame_id, "base_link");
-    
-
-    // micro-ROS init
-    // Executor with 1 handle (the subscription)
+    #ifdef USE_ODOM
+        nav_msgs__msg__Odometry__init(&odom_msg);
+        rosidl_runtime_c__String__assign(&odom_msg.header.frame_id, "odom");
+        rosidl_runtime_c__String__assign(&odom_msg.child_frame_id, "base_link");
+        for (int i = 0; i < 36; ++i) {
+            odom_msg.pose.covariance[i]  = 0.0;
+            odom_msg.twist.covariance[i] = 0.0;
+        }
+    #endif
     allocator = rcl_get_default_allocator();
     executor = rclc_executor_get_zero_initialized_executor();
     node = rcl_get_zero_initialized_node();
@@ -441,51 +426,53 @@ int main(void) {
     ret = rclc_node_init_default(&node, "pico", "", &support);
     if (ret != RCL_RET_OK) emergency_blink(11);
 
-    // Publishers
-    //rclc_publisher_init_default(
     rcl_ret_t rc1 = rclc_publisher_init_best_effort(
         &imu_pub, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
         "pico/imu");
+    
+    #ifdef USE_ODOM
+        rcl_ret_t rc0 = rclc_publisher_init_default(
+            &odom_pub, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+            "pico/odom"
+        );
+    #endif
+    rclc_publisher_init_best_effort(&left_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),  "encoder/left_ticks");
+    rclc_publisher_init_best_effort(&right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),  "encoder/right_ticks");
 
-    //rclc_publisher_init_default(
-    rcl_ret_t rc0 = rclc_publisher_init_best_effort(
-        &odom_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-        "pico/odom");
-
-        // Subscriber
-    rcl_ret_t rcs = rclc_subscription_init_best_effort( //rclc_subscription_init_default(
+    rcl_ret_t rcs = rclc_subscription_init_default( //rclc_subscription_init_default(
         &cmd_vel_sub, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "pico/cmd_vel");
-
     
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA);
     
-    int s1 = configMINIMAL_STACK_SIZE;
-    // Create your app tasks
     BaseType_t xRet = xTaskCreate(imu_task,  "imu",  4096,  NULL, 2, NULL);
     if( xRet != pdPASS )
     {
          emergency_blink(2);
     }
-
-    xRet = xTaskCreate(odom_task, "odom", 4096,  NULL, 2, NULL);
+    #ifdef USE_ODOM
+        xRet = xTaskCreate(odom_task, "odom", 4096,  NULL, 2, NULL);
+        if( xRet != pdPASS )
+        {
+            emergency_blink(3);
+        }
+    #endif
+    xRet = xTaskCreate(encoder_task, "encoders", 2048,  NULL, 2, NULL);
     if( xRet != pdPASS )
     {
         emergency_blink(3);
     }
 
-    // Create an executor task
     xRet = xTaskCreate(executor_task, "executor", 4096, NULL, 3, NULL);
     if( xRet != pdPASS )
     {
         emergency_blink(4);
     }
-    // *** Start the scheduler ***
-    //gpio_put(PICO_DEFAULT_LED_PIN, 1);
+
     vTaskStartScheduler();
     // Should never get here
     emergency_blink(8);

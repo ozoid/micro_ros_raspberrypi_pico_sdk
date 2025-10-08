@@ -37,6 +37,11 @@ target_link_libraries(pico_driver
 
 target_compile_definitions(pico_driver PUBLIC
     RCUTILS_NO_POSIX_SUPPORT
+    UXR_CONFIG_CUSTOM_TRANSPORT_MTU=1024
+    RMW_UXRCE_MAX_TRANSPORT_MTU=1024
+    RMW_UXRCE_STREAM_HISTORY_OUTPUT=8
+    RMW_UXRCE_STREAM_HISTORY_INPUT=8
+    RMW_UXRCE_MAX_MESSAGE_SIZE=2048
 )
 
 SET(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections")

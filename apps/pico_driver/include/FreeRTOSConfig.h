@@ -47,7 +47,6 @@
 #define MY_CONFIG_MARKER 12345
 
 
-
 /* Core scheduling */
 #define configENABLE_MPU                0
 #define configUSE_PREEMPTION            1
@@ -93,6 +92,4 @@
 #define configCPU_CLOCK_HZ              (125000000UL)
 #define configSYSTICK_CLOCK_HZ          configCPU_CLOCK_HZ
 
-//#define configSYSTEM_CALL_STACK_SIZE    256
-#pragma message("Using FreeRTOSConfig.h from " __FILE__)
 //#endif /* FREERTOS_CONFIG_H */
