@@ -12,6 +12,7 @@
 #include <sensor_msgs/msg/imu.h>
 #include <geometry_msgs/msg/twist.h>
 #include <std_msgs/msg/float32.h>
+#include <std_msgs/msg/int32.h>
 #include <rmw_microros/rmw_microros.h>
 #include <rosidl_runtime_c/string_functions.h>
 
@@ -19,9 +20,8 @@
 #include "hardware/pwm.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
+
 #include "FreeRTOS.h"
-#include "semphr.h"
-//#include "time_override.c"
 #include "task.h"
 
 #include "pico_uart_transports.h"
@@ -50,10 +50,6 @@
 #define WHEEL_BASE   0.09f  // 9 cm centre of front axle to centre of back axle
 #define TICKS_PER_REV 80
 
-SemaphoreHandle_t g_rcl_mutex;   // global
-#define RCL_LOCK()   xSemaphoreTake(g_rcl_mutex, portMAX_DELAY)
-#define RCL_UNLOCK() xSemaphoreGive(g_rcl_mutex)
-
 #ifndef PICO_DEFAULT_LED_PIN
 #define PICO_DEFAULT_LED_PIN 25
 #endif
@@ -66,6 +62,9 @@ rcl_publisher_t odom_pub;
 rcl_publisher_t imu_pub;
 rclc_executor_t executor;
 rcl_subscription_t cmd_vel_sub;
+rcl_allocator_t allocator;
+rclc_support_t support;
+rcl_node_t node;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 sensor_msgs__msg__Imu imu_msg;
@@ -97,6 +96,14 @@ void emergency_blink(int code, bool ret = false){
 
 }
 //-----------------------------------------------------------------------------
+void vApplicationMallocFailedHook(void)
+{
+    taskDISABLE_INTERRUPTS();
+    // Optional: print something if your stdio is safe here
+    // printf("Malloc failed\r\n");
+    emergency_blink(15);
+}
+//-----------------------------------------------------------------------------
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask; (void)pcTaskName;
@@ -104,16 +111,14 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     // Keep it simple: no logging, no malloc, no FreeRTOS calls.
     // Optionally mask interrupts so nothing else runs after a fatal error.
     // __disable_irq();
-
+    taskDISABLE_INTERRUPTS();
     emergency_blink(5);
    
 }
 //-----------------------------------------------------------------------------
 void executor_task(void *arg) {
     while (true) {
-        RCL_LOCK();
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-        RCL_UNLOCK();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -217,7 +222,7 @@ static inline void euler_to_quat_d(double roll, double pitch, double yaw,
     *qz = cr*cp*sy - sr*sp*cy;
 }
 //-----------------------------------------------------------------------------
-void imu_task(void *arg) {
+void _imu_task(void *arg) {
     while (true) {
         // Skip sensor read for testing
         imu_msg.orientation.w = 1.0;
@@ -228,16 +233,22 @@ void imu_task(void *arg) {
         uint64_t ms = rmw_uros_epoch_millis();
         imu_msg.header.stamp.sec = (int32_t)(ms / 1000);
         imu_msg.header.stamp.nanosec = (uint32_t)((ms % 1000) * 1000000u);
+
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);
         
-        RCL_LOCK();
         rcl_ret_t rc = rcl_publish(&imu_pub, &imu_msg, NULL);
-        RCL_UNLOCK();
+        if (rc != RCL_RET_OK) {
+            emergency_blink(7);
+        }
         
+        for (volatile uint32_t i = 0; i < 500000; ++i) { __asm volatile("nop"); }
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        for (volatile uint32_t i = 0; i < 500000; ++i) { __asm volatile("nop"); }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 // ===== IMU Task =====
-void _imu_task(void *arg) {
+void imu_task(void *arg) {
     uint8_t buf[6];
     while (true) {
         bno055_read(0x1A, buf, 6);
@@ -258,9 +269,7 @@ void _imu_task(void *arg) {
             &imu_msg.orientation.z,
             &imu_msg.orientation.w);
         
-        RCL_LOCK();
         rcl_ret_t rc = rcl_publish(&imu_pub, &imu_msg, NULL);
-        RCL_UNLOCK();
         if (rc != RCL_RET_OK) {
             emergency_blink(7);
         }
@@ -274,7 +283,7 @@ void _imu_task(void *arg) {
 void odom_task(void *arg) {
     static int32_t last_left = 0, last_right = 0;
     float x = 0, y = 0, theta = 0;
-    absolute_time_t last = get_absolute_time();
+    //absolute_time_t last = get_absolute_time();
 
     while (true) {
         int32_t l = left_encoder_count;
@@ -307,9 +316,7 @@ void odom_task(void *arg) {
         odom_msg.pose.pose.orientation.y = qy;
         odom_msg.pose.pose.orientation.z = qz;
         odom_msg.pose.pose.orientation.w = qw;
-        RCL_LOCK();
         rcl_ret_t rc = rcl_publish(&odom_pub, &odom_msg, NULL);
-        RCL_UNLOCK();
         if (rc != RCL_RET_OK) {
             emergency_blink(6);
         }
@@ -347,6 +354,45 @@ void init_encoders(){
 }
 //-----------------------------------------------------------------------------
 // ===== App Main =====
+
+void test_task(void *arg) {
+    while (true) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+int _main(void) {
+    #ifndef MY_CONFIG_MARKER
+    #error "Wrong FreeRTOSConfig.h being used!"
+    #endif
+    stdio_init_all();
+
+    gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+    
+    // Blink before FreeRTOS to verify hardware works
+    for(int i = 0; i < 5; i++) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);
+        sleep_ms(500);
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        sleep_ms(500);
+    }
+
+    xTaskCreate(test_task, "test", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    
+    // Should never reach here
+    while(1) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);
+        sleep_ms(100);
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        sleep_ms(100);
+    }
+}
+
 int main(void) {
     rmw_uros_set_custom_transport(
         true, NULL,
@@ -355,9 +401,8 @@ int main(void) {
         pico_serial_transport_write,
         pico_serial_transport_read);
 
-    sleep_ms(10);
-    g_rcl_mutex = xSemaphoreCreateMutex();
-    configASSERT(g_rcl_mutex != NULL);
+    //sleep_ms(100);
+    busy_wait_ms(1000);
 
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
@@ -366,43 +411,14 @@ int main(void) {
     init_motors();
     init_encoders();
 
-    rcl_allocator_t allocator = rcl_get_default_allocator();
-    rclc_support_t support;
-    rcl_node_t node;
-    
-    gpio_put(PICO_DEFAULT_LED_PIN, 1);
+ 
+    gpio_put(PICO_DEFAULT_LED_PIN, 0);
     // Make sure the agent is up before proceeding
     const int timeout_ms = 1000;
     const uint8_t attempts = 120;
     if (rmw_uros_ping_agent(timeout_ms, attempts) != RCL_RET_OK) {
         emergency_blink(1);
     }
-    
-
-    // micro-ROS init
-    rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
-    if (ret != RCL_RET_OK) emergency_blink(10);
-
-    ret = rclc_node_init_default(&node, "pico", "", &support);
-    if (ret != RCL_RET_OK) emergency_blink(11);
-
-    // Publishers
-    rclc_publisher_init_default(
-        &odom_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-        "pico/odom");
-
-    rclc_publisher_init_default(
-        &imu_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-        "pico/imu");
-
-    // Subscriber
-    rclc_subscription_init_default(
-        &cmd_vel_sub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "pico/cmd_vel");
-
 
     sensor_msgs__msg__Imu__init(&imu_msg);
     nav_msgs__msg__Odometry__init(&odom_msg);
@@ -411,11 +427,43 @@ int main(void) {
     rosidl_runtime_c__String__assign(&odom_msg.header.frame_id, "odom");
     // Odometry also commonly sets child_frame_id
     rosidl_runtime_c__String__assign(&odom_msg.child_frame_id, "base_link");
+    
 
+    // micro-ROS init
     // Executor with 1 handle (the subscription)
+    allocator = rcl_get_default_allocator();
+    executor = rclc_executor_get_zero_initialized_executor();
+    node = rcl_get_zero_initialized_node();
+
+    rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
+    if (ret != RCL_RET_OK) emergency_blink(10);
+    
+    ret = rclc_node_init_default(&node, "pico", "", &support);
+    if (ret != RCL_RET_OK) emergency_blink(11);
+
+    // Publishers
+    //rclc_publisher_init_default(
+    rcl_ret_t rc1 = rclc_publisher_init_best_effort(
+        &imu_pub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+        "pico/imu");
+
+    //rclc_publisher_init_default(
+    rcl_ret_t rc0 = rclc_publisher_init_best_effort(
+        &odom_pub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+        "pico/odom");
+
+        // Subscriber
+    rcl_ret_t rcs = rclc_subscription_init_best_effort( //rclc_subscription_init_default(
+        &cmd_vel_sub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "pico/cmd_vel");
+
+    
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA);
-
+    
     int s1 = configMINIMAL_STACK_SIZE;
     // Create your app tasks
     BaseType_t xRet = xTaskCreate(imu_task,  "imu",  4096,  NULL, 2, NULL);
@@ -437,8 +485,9 @@ int main(void) {
         emergency_blink(4);
     }
     // *** Start the scheduler ***
-    gpio_put(PICO_DEFAULT_LED_PIN, 1);
+    //gpio_put(PICO_DEFAULT_LED_PIN, 1);
     vTaskStartScheduler();
     // Should never get here
     emergency_blink(8);
+    return 0;
 }
