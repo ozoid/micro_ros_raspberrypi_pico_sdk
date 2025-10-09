@@ -434,7 +434,7 @@ int main(void) {
             "pico/odom"
         );
     #endif
-    rclc_publisher_init_best_effort(&wheel_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int64),  "encoder/wheel_ticks");
+    rclc_publisher_init_best_effort(&wheel_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int64),  "encoder/ticks");
 
     rcl_ret_t rcs = rclc_subscription_init_default( //rclc_subscription_init_default(
         &cmd_vel_sub, &node,
