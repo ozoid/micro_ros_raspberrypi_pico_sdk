@@ -13,6 +13,7 @@
 #include <geometry_msgs/msg/twist.h>
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/int64.h>
 #include <rmw_microros/rmw_microros.h>
 #include <rosidl_runtime_c/string_functions.h>
 
@@ -63,7 +64,7 @@ volatile int32_t right_encoder_count = 0;
     rcl_publisher_t odom_pub;
     nav_msgs__msg__Odometry odom_msg;
 #endif
-rcl_publisher_t left_pub, right_pub;
+rcl_publisher_t wheel_pub;
 rcl_publisher_t imu_pub;
 rclc_executor_t executor;
 rcl_subscription_t cmd_vel_sub;
@@ -73,7 +74,7 @@ rcl_node_t node;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 sensor_msgs__msg__Imu imu_msg;
-std_msgs__msg__Int32 left_msg, right_msg;
+std_msgs__msg__Int64 wheel_msg;
 
 float linear_vel = 0.0, angular_vel = 0.0;
 // Last commanded speeds
@@ -128,7 +129,7 @@ void executor_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
+//-----------------------------------------------------------------------------
 // ===== I2C / BNO055 functions =====
 void bno055_write(uint8_t reg, uint8_t val) {
     uint8_t buf[2] = {reg, val};
@@ -290,13 +291,9 @@ void encoder_task(void*) {
     while (true) {
         int32_t l = left_encoder_count;
         int32_t r = right_encoder_count;
-
-        left_msg.data  = l;   // or (l - last_l) for deltas
-        right_msg.data = r;   // or (r - last_r)
-
-        rcl_publish(&left_pub,  &left_msg,  NULL);
-        rcl_publish(&right_pub, &right_msg, NULL);
-
+        int64_t p = ((uint64_t)(uint32_t)r << 32) | (uint32_t)l;
+        wheel_msg.data  = p;   // or (l - last_l) for deltas
+        rcl_publish(&wheel_pub,  &wheel_msg,  NULL);
         last_l = l; last_r = r;
         vTaskDelay(pdMS_TO_TICKS(50));  // 20 Hz
     }
@@ -404,8 +401,7 @@ int main(void) {
         emergency_blink(1);
     }
     sensor_msgs__msg__Imu__init(&imu_msg);
-    std_msgs__msg__Int32__init(&left_msg);
-    std_msgs__msg__Int32__init(&right_msg);
+    std_msgs__msg__Int64__init(&wheel_msg);
     rosidl_runtime_c__String__assign(&imu_msg.header.frame_id,  "base_link");
     #ifdef USE_ODOM
         nav_msgs__msg__Odometry__init(&odom_msg);
@@ -438,8 +434,7 @@ int main(void) {
             "pico/odom"
         );
     #endif
-    rclc_publisher_init_best_effort(&left_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),  "encoder/left_ticks");
-    rclc_publisher_init_best_effort(&right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),  "encoder/right_ticks");
+    rclc_publisher_init_best_effort(&wheel_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int64),  "encoder/wheel_ticks");
 
     rcl_ret_t rcs = rclc_subscription_init_default( //rclc_subscription_init_default(
         &cmd_vel_sub, &node,
